@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/YakDriver/regexache"
@@ -28,6 +29,9 @@ import (
 	"github.com/hashicorp/terraform-provider-aws/internal/verify"
 	"github.com/hashicorp/terraform-provider-aws/names"
 )
+
+// Environment variables prefixed with this string will be treated as default_tags.
+const DefaultTagsEnvVarPrefix = "TF_AWS_DEFAULT_VARS_"
 
 // New returns a new, initialized Terraform Plugin SDK v2-style provider instance.
 // The provider instance is fully configured once the `ConfigureContextFunc` has been called.
@@ -65,10 +69,11 @@ func New(ctx context.Context) (*schema.Provider, error) {
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
 						"tags": {
-							Type:        schema.TypeMap,
-							Optional:    true,
-							Elem:        &schema.Schema{Type: schema.TypeString},
-							Description: "Resource tags to default across all resources",
+							Type:     schema.TypeMap,
+							Optional: true,
+							Elem:     &schema.Schema{Type: schema.TypeString},
+							Description: "Resource tags to default across all resources. " +
+								"Can also be configured with environment variables like `" + DefaultTagsEnvVarPrefix + "<tag_name>`.",
 						},
 					},
 				},
@@ -518,6 +523,8 @@ func configure(ctx context.Context, provider *schema.Provider, d *schema.Resourc
 
 	if v, ok := d.GetOk("default_tags"); ok && len(v.([]interface{})) > 0 && v.([]interface{})[0] != nil {
 		config.DefaultTagsConfig = expandDefaultTags(ctx, v.([]interface{})[0].(map[string]interface{}))
+	} else {
+		config.DefaultTagsConfig = expandDefaultTags(ctx, nil)
 	}
 
 	if v, ok := d.GetOk("endpoints"); ok && v.(*schema.Set).Len() > 0 {
@@ -810,17 +817,29 @@ func expandAssumeRoleWithWebIdentity(_ context.Context, tfMap map[string]interfa
 }
 
 func expandDefaultTags(ctx context.Context, tfMap map[string]interface{}) *tftags.DefaultConfig {
-	if tfMap == nil {
-		return nil
-	}
-
 	defaultConfig := &tftags.DefaultConfig{}
 
-	if v, ok := tfMap["tags"].(map[string]interface{}); ok {
-		defaultConfig.Tags = tftags.New(ctx, v)
+	tags := make(map[string]interface{})
+	for _, ev := range os.Environ() {
+		k, v, _ := strings.Cut(ev, "=")
+		before, tk, ok := strings.Cut(k, DefaultTagsEnvVarPrefix)
+		if ok && before == "" {
+			tags[tk] = v
+		}
 	}
 
-	return defaultConfig
+	if cfgTags, ok := tfMap["tags"].(map[string]interface{}); ok {
+		for k, v := range cfgTags {
+			tags[k] = v
+		}
+	}
+
+	if len(tags) > 0 {
+		defaultConfig.Tags = tftags.New(ctx, tags)
+		return defaultConfig
+	}
+
+	return nil
 }
 
 func expandIgnoreTags(ctx context.Context, tfMap map[string]interface{}) *tftags.IgnoreConfig {
